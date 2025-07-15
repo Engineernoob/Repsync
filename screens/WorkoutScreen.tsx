@@ -1,121 +1,184 @@
 // screens/WorkoutScreen.tsx
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
-import { Camera, CameraType } from 'expo-camera';
+import { View, Text, StyleSheet, ActivityIndicator, Platform } from 'react-native';
+import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgl';
 import * as poseDetection from '@tensorflow-models/pose-detection';
 
+// Helper type for the ref
+type CameraRef = React.ComponentRef<typeof CameraView>;
+
 export default function WorkoutScreen() {
-  const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const [isTfReady, setIsTfReady] = useState(false);
+  const cameraRef = useRef<CameraRef | null>(null);
+  const [permission, requestPermission] = useCameraPermissions();
+  
+  // State
+  const [tfReady, setTfReady] = useState(false);
   const [detector, setDetector] = useState<poseDetection.PoseDetector | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const cameraRef = useRef<typeof Camera | null>(null); // ✅ correct and safe ref
 
+  // One-time setup
   useEffect(() => {
-    let isMounted = true;
-    
-    (async () => {
+    const initializeApp = async () => {
       try {
-        const { status } = await Camera.requestCameraPermissionsAsync();
-        if (isMounted) setHasPermission(status === 'granted');
+        // Request camera permission if not already granted
+        if (!permission?.granted) {
+          const result = await requestPermission();
+          if (!result.granted) {
+            setError('Camera permission denied');
+            setIsLoading(false);
+            return;
+          }
+        }
 
-        await tf.setBackend('webgl');
+        // Initialize TensorFlow
         await tf.ready();
-        if (isMounted) setIsTfReady(true);
+        
+        // Set backend based on platform
+        if (Platform.OS === 'web') {
+          await tf.setBackend('webgl');
+        } else {
+          // For mobile, use cpu backend as webgl might not be available
+          await tf.setBackend('cpu');
+        }
+        
+        setTfReady(true);
 
-    const detectorConfig: poseDetection.movenet.ModelConfig = {
-      modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+        // Load MoveNet (SinglePose Lightning)
+        const detectorCfg: poseDetection.MoveNetModelConfig = { 
+          modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING 
         };
         
-        const detectorInstance = await poseDetection.createDetector(
+        const detectorInst = await poseDetection.createDetector(
           poseDetection.SupportedModels.MoveNet,
-          detectorConfig
+          detectorCfg,
         );
         
-        if (isMounted) setDetector(detectorInstance);
+        setDetector(detectorInst);
+        setIsLoading(false);
+        
       } catch (err) {
-        if (isMounted) setError(err instanceof Error ? err.message : 'Unknown error occurred');
-      }
-    })();
-
-    return () => {
-      isMounted = false;
-      if (detector) {
-        detector.dispose();
+        console.error('Error initializing app:', err);
+        setError(err instanceof Error ? err.message : 'Failed to initialize');
+        setIsLoading(false);
       }
     };
-  }, []);
 
+    initializeApp();
+  }, [permission]);
+
+  // Confirm everything is ready
   useEffect(() => {
-    if (isTfReady && detector && cameraRef.current) {
-      console.log('✅ TensorFlow ready, pose detector loaded');
-      // You can run pose detection on an image frame here later
+    if (tfReady && detector && !error) {
+      console.log('✅ Pose detector ready');
     }
-  }, [isTfReady, detector]);
+  }, [tfReady, detector, error]);
 
-  if (hasPermission === null) return <View />;
-  if (hasPermission === false) return <Text>No access to camera</Text>;
+  // Permission guards
+  if (!permission) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#fff" />
+          <Text style={styles.loadingText}>Requesting camera permission...</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (!permission.granted) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorText}>Camera access denied</Text>
+          <Text style={styles.errorSubtext}>Please enable camera permissions in settings</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.errorContainer}>
+          <Text style={styles.errorText}>Error: {error}</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>Welcome to Repsync 🧠💪</Text>
-      
-      {error ? (
-        <Text style={styles.errorText}>Error: {error}</Text>
-      ) : hasPermission ? (
-        <Camera
-          style={styles.camera}
-          type={Camera.Constants.Type.front}
-          ref={cameraRef}
-        >
-          <View style={styles.overlay}>
-            {isTfReady && detector ? (
-              <Text style={styles.subtitle}>✅ Pose detector ready</Text>
-            ) : (
-              <ActivityIndicator size="large" color="#fff" />
-            )}
-          </View>
-        </Camera>
-      ) : (
-        <Text style={styles.subtitle}>Camera permission required</Text>
-      )}
+      <CameraView
+        ref={cameraRef}
+        style={styles.camera}
+        facing="front"
+        ratio="16:9"
+      />
+      <View style={styles.banner}>
+        {tfReady && detector && !isLoading ? (
+          <Text style={styles.bannerText}>Pose detector ready ✅</Text>
+        ) : (
+          <>
+            <ActivityIndicator color="#fff" style={{ marginRight: 8 }} />
+            <Text style={styles.bannerText}>Loading model...</Text>
+          </>
+        )}
+      </View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  camera: {
-    width: '100%',
-    height: '70%',
-    borderRadius: 16,
-    overflow: 'hidden',
+  container: { 
+    flex: 1, 
+    backgroundColor: '#000' 
   },
-  overlay: {
+  camera: { 
+    flex: 1 
+  },
+  banner: {
+    position: 'absolute',
+    bottom: 40,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bannerText: { 
+    color: '#fff', 
+    fontSize: 14 
+  },
+  loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
+  },
+  loadingText: {
+    color: '#fff',
+    marginTop: 10,
+    fontSize: 16,
+  },
+  errorContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 20,
   },
   errorText: {
-    color: 'red',
-    fontSize: 16,
-    marginTop: 20,
+    color: '#ff4444',
+    fontSize: 18,
+    textAlign: 'center',
+    marginBottom: 10,
   },
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: '700',
-  },
-  subtitle: {
-    marginTop: 12,
-    fontSize: 16,
-    color: '#666',
+  errorSubtext: {
+    color: '#fff',
+    fontSize: 14,
+    textAlign: 'center',
   },
 });
